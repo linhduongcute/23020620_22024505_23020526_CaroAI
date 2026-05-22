@@ -2,6 +2,7 @@ import sys
 #pyrefly: ignore [missing-import]
 import pygame
 import threading
+import copy
 from game_logic import CaroGame
 from ai_engine import CaroAI
 
@@ -70,6 +71,7 @@ class CaroApp:
         
         self.init_menu_buttons()
         self.ai_thinking = False
+        self.game_lock = threading.Lock()
 
     def init_menu_buttons(self):
         """Cấu hình lại vị trí các nút bấm"""
@@ -84,6 +86,7 @@ class CaroApp:
         self.btn_depth4 = Button(305, 310, 100, 45, "Depth 4")
         
         self.btn_start = Button(95, 410, 260, 65, "START GAME")
+        self.btn_home = Button(WIDTH//2 - 95, HEIGHT - 47, 190, 36, "MAIN MENU")
         
     def draw_menu(self):
         """Vẽ giao diện Menu dùng ký tự thường thay cho Emoji lỗi font"""
@@ -161,10 +164,22 @@ class CaroApp:
         print(f"=====================================")
         
         if self.first_player == 2:
-            threading.Thread(target=self.handle_ai_turn).start()
+            self.start_ai_turn()
+
+    def start_ai_turn(self):
+        if self.ai_thinking:
+            return
+
+        self.ai_thinking = True
+        threading.Thread(target=self.handle_ai_turn, daemon=True).start()
 
     def draw_board(self):
         """Vẽ bàn cờ và TỰ VẼ quân cờ bằng hình học, không lo lỗi phông chữ"""
+        with self.game_lock:
+            board = self.game.board.copy()
+            is_game_over = self.game.is_game_over
+            winner = self.game.check_winner() if is_game_over else None
+
         self.screen.fill(BG_COLOR)
         
         # Vẽ lưới caro
@@ -173,7 +188,7 @@ class CaroApp:
                 rect = pygame.Rect(c * CELL_SIZE, r * CELL_SIZE, CELL_SIZE, CELL_SIZE)
                 pygame.draw.rect(self.screen, LINE_COLOR, rect, 1)
                 
-                player = self.game.board[r][c]
+                player = board[r][c]
                 # Tính toán tọa độ tâm và khoảng cách đệm (padding) để vẽ quân cờ cho đẹp
                 center_x, center_y = rect.centerx, rect.centery
                 padding = 14
@@ -197,8 +212,7 @@ class CaroApp:
         self.screen.blit(surf_algo, (20, HEIGHT - 95))
         
         # Hiển thị trạng thái trận đấu
-        if self.game.is_game_over:
-            winner = self.game.check_winner()
+        if is_game_over:
             if winner == 1:
                 status = "You (X) Win!"
                 color = X_COLOR
@@ -209,7 +223,8 @@ class CaroApp:
                 status = "Draw Game!"
                 color = TEXT_COLOR
             surf_status = self.font_large.render(status, True, color)
-            self.screen.blit(surf_status, (WIDTH//2 - surf_status.get_width()//2, HEIGHT - 55))
+            self.screen.blit(surf_status, (WIDTH//2 - surf_status.get_width()//2, HEIGHT - 86))
+            self.btn_home.draw(self.screen, self.font_medium)
         else:
             if self.ai_thinking:
                 turn_text = "AI is thinking..."
@@ -223,30 +238,30 @@ class CaroApp:
         pygame.display.flip()
 
     def handle_ai_turn(self):
-        self.ai_thinking = True
-        self.draw_board() 
-        
-        self.ai.compare_algorithms(self.game)
-        best_move, score, elapsed_time, total_states = self.ai.get_best_move(self.game, self.algorithm)
-        
-        print(f"\n[EXECUTION] Applying selected algorithm: {self.algorithm.upper()}")
-        
-        if best_move:
-            r, c = best_move
-            self.game.make_move(r, c, self.ai.ai_player)
+        try:
+            with self.game_lock:
+                ai_game = copy.deepcopy(self.game)
+
+            best_move, score, elapsed_time, total_states = self.ai.get_best_move(ai_game, self.algorithm)
             
-            print(f"[AI INFO] Chosen Move: Row {r}, Col {c}")
-            print(f"[AI INFO] Evaluation Score: {score}")
-            print(f"[AI INFO] Explored States: {total_states} nodes")
-            print(f"[AI INFO] Elapsed Time: {elapsed_time:.4f}s")
-            print("====================================================")
+            print(f"\n[EXECUTION] Applying selected algorithm: {self.algorithm.upper()}")
             
-            if self.game.check_winner() is not None:
-                self.game.is_game_over = True
-            
-            self.game.current_player = 1
-            
-        self.ai_thinking = False
+            if best_move:
+                r, c = best_move
+                with self.game_lock:
+                    self.game.make_move(r, c, self.ai.ai_player)
+                    if self.game.check_winner() is not None:
+                        self.game.is_game_over = True
+
+                    self.game.current_player = 1
+                
+                print(f"[AI INFO] Chosen Move: Row {r}, Col {c}")
+                print(f"[AI INFO] Evaluation Score: {score}")
+                print(f"[AI INFO] Explored States: {total_states} nodes")
+                print(f"[AI INFO] Elapsed Time: {elapsed_time:.4f}s")
+                print("====================================================")
+        finally:
+            self.ai_thinking = False
 
     def run(self):
         while True:
@@ -260,19 +275,30 @@ class CaroApp:
                         self.handle_menu_click(pygame.mouse.get_pos())
                         
                 elif self.state == "GAME":
+                    if self.game.is_game_over:
+                        if event.type == pygame.MOUSEBUTTONDOWN and self.btn_home.rect.collidepoint(pygame.mouse.get_pos()):
+                            self.state = "MENU"
+                        continue
+
                     if not self.game.is_game_over and not self.ai_thinking:
                         if self.game.current_player == 1 and event.type == pygame.MOUSEBUTTONDOWN:
                             mx, my = pygame.mouse.get_pos()
                             if my < HEIGHT - 110:
                                 c = mx // CELL_SIZE
                                 r = my // CELL_SIZE
+                                should_start_ai = False
                                 
-                                if self.game.make_move(r, c, 1):
-                                    if self.game.check_winner() is not None:
-                                        self.game.is_game_over = True
-                                    else:
-                                        self.game.current_player = 2
-                                        threading.Thread(target=self.handle_ai_turn).start()
+                                with self.game_lock:
+                                    move_made = self.game.make_move(r, c, 1)
+                                    if move_made:
+                                        if self.game.check_winner() is not None:
+                                            self.game.is_game_over = True
+                                        else:
+                                            self.game.current_player = 2
+                                            should_start_ai = True
+
+                                if should_start_ai:
+                                    self.start_ai_turn()
 
             if self.state == "MENU":
                 self.draw_menu()
